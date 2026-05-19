@@ -171,7 +171,10 @@ function do_move(c,fr,fc,tr,tc,  res,cap,p,oc,chk,mate,sep) {
     oc=opp(c); chk=in_check(oc)
     mate=(chk && !has_legal_move(oc)) ? 1 : 0
 
-    save_state()
+    # Tentukan STATUS baru: GAMEOVER jika checkmate, selain itu ACTIVE
+    new_status = (mate ? "GAMEOVER" : "ACTIVE")
+
+    save_state(oc, new_status)
 
     return "OK\nMOVE_COUNT:" move_count \
            "\nCAPTURED:" cap \
@@ -183,11 +186,17 @@ function do_move(c,fr,fc,tr,tc,  res,cap,p,oc,chk,mate,sep) {
 }
 
 # ── Simpan state ke file ──────────────────────────────────────
-function save_state(  r,c,p,first,bs) {
-    # Tulis ulang seluruh file (bukan append)
-    print "MOVE_COUNT:"    move_count > state_file
-    print "WHITE_CAPTURED:" white_cap >> state_file
-    print "BLACK_CAPTURED:" black_cap >> state_file
+# FIX #1: Tambah next_player sebagai parameter agar CURRENT_PLAYER tersimpan
+# FIX #2: Tambah status sebagai parameter agar STATUS tidak hilang
+function save_state(next_player, status,   r,c,p,first,bs) {
+    # Tulis ulang seluruh file sekaligus (atomic lewat file tmp lalu rename)
+    # agar tidak ada pembaca yang membaca file setengah-selesai
+    tmp_file = state_file ".tmp"
+    print "MOVE_COUNT:"     move_count   > tmp_file
+    print "CURRENT_PLAYER:" next_player >> tmp_file
+    print "STATUS:"         status      >> tmp_file
+    print "WHITE_CAPTURED:" white_cap   >> tmp_file
+    print "BLACK_CAPTURED:" black_cap   >> tmp_file
     # Board
     first=1; bs=""
     for(r=0;r<8;r++) for(c=0;c<8;c++) {
@@ -195,8 +204,10 @@ function save_state(  r,c,p,first,bs) {
         bs = bs (first?"":"|") p "," col(p) "," r "," c
         first=0
     }
-    print "BOARD:" bs >> state_file
-    close(state_file)
+    print "BOARD:" bs >> tmp_file
+    close(tmp_file)
+    # Rename atomik — pembaca tidak akan mendapat file setengah-tulis
+    system("mv " tmp_file " " state_file)
 }
 
 # ── Cetak papan untuk draw_board ─────────────────────────────

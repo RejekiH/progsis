@@ -219,6 +219,8 @@ _draw_row_rev() {
 }
 
 # ── Parse notasi catur ────────────────────────────────────────
+# FIX #5: Client hanya memvalidasi format dan mengembalikan notasi bersih.
+# Server yang melakukan konversi ke koordinat di process_move().
 parse_move() {
     local raw="${1//-/}"; raw="${raw// /}"
     [[ "$raw" =~ ^[a-h][1-8][a-h][1-8]$ ]] || return 1
@@ -226,13 +228,17 @@ parse_move() {
 }
 
 # ── Terima notifikasi dari server (background) ────────────────
+# FIX #5: Fungsi ini sekarang dipanggil di main() setelah GAME_START diterima.
 start_notify_listener() {
     (
         while true; do
             local msg
-            if read -r -t 30 msg < "$MY_NOTIFY" 2>/dev/null; then
+            # Timeout 60 detik per read — jika server mati, loop ini berhenti
+            if read -r -t 60 msg < "$MY_NOTIFY" 2>/dev/null; then
                 printf "%s\n" "$msg" > "/tmp/${GAME_ID}_notify_buf_${PLAYER}"
             fi
+            # Berhenti jika state file sudah tidak ada (server mati)
+            [ -f "/tmp/${GAME_ID}_state" ] || break
         done
     ) &
     NOTIFY_PID=$!
@@ -288,6 +294,9 @@ main() {
 
     GAME_ACTIVE=1
     log_msg "Game dimulai"
+    # FIX #5: Jalankan listener notifikasi background SEKARANG agar
+    # tidak berkompetisi dengan read langsung di game loop giliran lawan
+    start_notify_listener
 
     # ── Game loop client ──────────────────────────────────────
     while [ $GAME_ACTIVE -eq 1 ]; do
@@ -331,9 +340,18 @@ main() {
             log_msg "Send move: $notation"
             echo "$notation" > "$MY_PIPE"
 
-            # Tunggu respons dari server
-            local resp=""
-            read -r -t 10 resp < "$MY_NOTIFY"
+            # FIX #5: Tunggu respons dari buffer file (ditulis listener background).
+            # Listener sudah memegang pipe, jadi kita tidak bisa read langsung.
+            local resp="" buf_file="/tmp/${GAME_ID}_notify_buf_${PLAYER}"
+            local waited=0
+            while [ $waited -lt 10 ] && [ -z "$resp" ]; do
+                sleep 0.2; waited=$(( waited + 1 ))
+                if [ -f "$buf_file" ]; then
+                    resp=$(cat "$buf_file" 2>/dev/null)
+                    rm -f "$buf_file"
+                fi
+            done
+            [ -z "$resp" ] && resp="TIMEOUT"
 
             case "$resp" in
                 UPDATE:*)
@@ -378,6 +396,8 @@ main() {
                 SERVER_SHUTDOWN)
                     printf "\n${RED}Server dimatikan.${RESET}\n"
                     GAME_ACTIVE=0; break ;;
+                TIMEOUT|"")
+                    LAST_MSG="${YELLOW}⚠ Tidak ada respons dari server. Coba lagi.${RESET}" ;;
             esac
 
         else
@@ -385,17 +405,23 @@ main() {
             printf "\n  ${DIM}Menunggu giliran %s...${RESET}\n" "$OPP_NAME"
             printf "  ${DIM}(ketik 'quit' lalu Enter untuk keluar)${RESET}\n  > "
 
-            # Baca notifikasi dari server ATAU input keyboard
-            local resp=""
+            # FIX #5: Baca dari buffer file yang ditulis start_notify_listener(),
+            # bukan langsung dari pipe (listener sudah memegang pipe tersebut).
+            local resp="" buf_file="/tmp/${GAME_ID}_notify_buf_${PLAYER}"
+            local input=""
             while [ -z "$resp" ] && [ $GAME_ACTIVE -eq 1 ]; do
-                # Cek notifikasi (non-blocking dengan timeout singkat)
-                if read -r -t 1 resp < "$MY_NOTIFY" 2>/dev/null; then
-                    break
+                # Cek buffer notifikasi yang ditulis listener
+                if [ -f "$buf_file" ]; then
+                    resp=$(cat "$buf_file" 2>/dev/null)
+                    rm -f "$buf_file"
+                    [ -n "$resp" ] && break
                 fi
-                # Cek apakah user mengetik sesuatu
-                if read -r -t 0.1 input 2>/dev/null; then
+                # Cek apakah user mengetik sesuatu (quit)
+                if read -r -t 0.3 input 2>/dev/null; then
                     input="${input,,}"
-                    [ "$input" = "quit" ] || [ "$input" = "q" ] && { GAME_ACTIVE=0; break; }
+                    if [ "$input" = "quit" ] || [ "$input" = "q" ]; then
+                        GAME_ACTIVE=0; break
+                    fi
                 fi
             done
 

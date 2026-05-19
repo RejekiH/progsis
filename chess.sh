@@ -46,6 +46,8 @@ player_name() { [ "$1" = "w" ] && printf "WHITE" || printf "BLACK"; }
 init_state() {
     cat > "$STATE_FILE" << 'EOF'
 MOVE_COUNT:0
+CURRENT_PLAYER:w
+STATUS:ACTIVE
 WHITE_CAPTURED:
 BLACK_CAPTURED:
 BOARD:r,b,0,0|n,b,0,1|b,b,0,2|q,b,0,3|k,b,0,4|b,b,0,5|n,b,0,6|r,b,0,7|p,b,1,0|p,b,1,1|p,b,1,2|p,b,1,3|p,b,1,4|p,b,1,5|p,b,1,6|p,b,1,7|P,w,6,0|P,w,6,1|P,w,6,2|P,w,6,3|P,w,6,4|P,w,6,5|P,w,6,6|P,w,6,7|R,w,7,0|N,w,7,1|B,w,7,2|Q,w,7,3|K,w,7,4|B,w,7,5|N,w,7,6|R,w,7,7
@@ -59,9 +61,14 @@ start_thread_monitor() {
         while true; do
             sleep 3
             [ -f "$STATE_FILE" ] || break
+            local mc st
             mc=$(grep "^MOVE_COUNT:" "$STATE_FILE" 2>/dev/null | cut -d: -f2)
-            log_msg "THREAD" "Heartbeat move=$mc"
-            [ "$GAME_ACTIVE" = "0" ] && break
+            # FIX #6: Cek STATUS dari state file — bukan variabel GAME_ACTIVE.
+            # Subshell tidak mewarisi perubahan variabel dari parent shell,
+            # jadi membaca GAME_ACTIVE di sini selalu bernilai awal (0).
+            st=$(grep "^STATUS:" "$STATE_FILE" 2>/dev/null | cut -d: -f2)
+            [ "$st" = "GAMEOVER" ] || [ "$st" = "SHUTDOWN" ] && break
+            log_msg "THREAD" "Heartbeat move=$mc status=$st"
         done
         log_msg "THREAD" "Monitor selesai"
     ) &
@@ -368,6 +375,10 @@ game_loop() {
     done
 
     GAME_ACTIVE=0
+    # FIX #6: Tulis STATUS=GAMEOVER ke state file agar thread monitor tahu harus berhenti
+    if [ -f "$STATE_FILE" ]; then
+        sed -i "s|^STATUS:.*|STATUS:GAMEOVER|" "$STATE_FILE" 2>/dev/null
+    fi
     log_msg "INFO" "Game selesai. Total move: $MOVE_COUNT"
 }
 

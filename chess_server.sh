@@ -113,14 +113,16 @@ setup_pipes() {
 # ── Kirim notifikasi ke semua client ──────────────────────────
 notify_clients() {
     local msg="$1"
-    # Non-blocking write ke notify pipe
-    ( echo "$msg" > "$NOTIFY_W" ) &
-    ( echo "$msg" > "$NOTIFY_B" ) &
+    # FIX #4: Gunakan timeout agar tidak blocking jika salah satu client disconnect
+    # Jika client tidak membaca dalam 3 detik, write dibatalkan
+    ( timeout 3 bash -c "echo '$msg' > '$NOTIFY_W'" 2>/dev/null ) &
+    ( timeout 3 bash -c "echo '$msg' > '$NOTIFY_B'" 2>/dev/null ) &
 }
 
 notify_one() {
     local pipe="$1" msg="$2"
-    ( echo "$msg" > "$pipe" ) &
+    # FIX #4: Sama — timeout 3 detik agar tidak blocking
+    ( timeout 3 bash -c "echo '$msg' > '$pipe'" 2>/dev/null ) &
 }
 
 # ── Proses satu gerakan ───────────────────────────────────────
@@ -140,11 +142,17 @@ process_move() {
     tc=$(( $(printf '%d' "'${raw:2:1}") - 97 ))
     tr=$(( 8 - ${raw:3:1} ))
     
-    # Panggil AWK engine
+    # FIX #3: Akuisisi lock sebelum AWK baca+tulis state file
+    # Ini mencegah race condition dengan thread monitor yang juga membaca state file
+    while ! mkdir "$LOCK_FILE" 2>/dev/null; do sleep 0.05; done
+
     local resp
     resp=$(awk -f "$ENGINE" -v cmd=MOVE -v player="$player" \
                -v fr="$fr" -v fc="$fc" -v tr="$tr" -v tc="$tc" \
                -v state_file="$STATE_FILE" /dev/null)
+    
+    # Lepas lock setelah AWK selesai (termasuk save_state di dalamnya)
+    rmdir "$LOCK_FILE" 2>/dev/null
     
     echo "$resp"
 }
@@ -286,26 +294,41 @@ main() {
     init_state
     start_thread_monitor
     
-    # Tunggu WHITE connect
-    printf "  ${DIM}Menunggu WHITE...${RESET} "
+    # Tunggu WHITE connect — FIX #4: timeout 300 detik (5 menit)
+    printf "  ${DIM}Menunggu WHITE (timeout 5 menit)...${RESET} "
     local conn_msg
-    read -r conn_msg < "$PIPE_W"
+    if ! read -r -t 300 conn_msg < "$PIPE_W"; then
+        printf "${RED}Timeout! WHITE tidak terhubung.${RESET}\n"
+        log_msg "ERROR" "Timeout menunggu WHITE"
+        cleanup; return
+    fi
     if [ "$conn_msg" = "CONNECT:w" ]; then
         WHITE_CONNECTED=1
         printf "${GREEN}Terhubung!${RESET}\n"
         shm_write "WHITE_STATUS" "CONNECTED"
         notify_one "$NOTIFY_W" "CONNECTED:w:WAIT_BLACK"
         log_msg "INFO" "WHITE terhubung"
+    else
+        printf "${RED}Pesan tidak dikenal dari WHITE: %s${RESET}\n" "$conn_msg"
+        cleanup; return
     fi
     
-    # Tunggu BLACK connect
-    printf "  ${DIM}Menunggu BLACK...${RESET} "
-    read -r conn_msg < "$PIPE_B"
+    # Tunggu BLACK connect — FIX #4: timeout 300 detik (5 menit)
+    printf "  ${DIM}Menunggu BLACK (timeout 5 menit)...${RESET} "
+    if ! read -r -t 300 conn_msg < "$PIPE_B"; then
+        printf "${RED}Timeout! BLACK tidak terhubung.${RESET}\n"
+        log_msg "ERROR" "Timeout menunggu BLACK"
+        notify_one "$NOTIFY_W" "SERVER_SHUTDOWN"
+        cleanup; return
+    fi
     if [ "$conn_msg" = "CONNECT:b" ]; then
         BLACK_CONNECTED=1
         printf "${GREEN}Terhubung!${RESET}\n"
         shm_write "BLACK_STATUS" "CONNECTED"
         log_msg "INFO" "BLACK terhubung"
+    else
+        printf "${RED}Pesan tidak dikenal dari BLACK: %s${RESET}\n" "$conn_msg"
+        cleanup; return
     fi
     
     printf "\n  ${GREEN}${BOLD}Kedua pemain siap! Game dimulai!${RESET}\n\n"
